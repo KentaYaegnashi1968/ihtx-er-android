@@ -1,66 +1,61 @@
 package com.example.videoeffects
 
-import android.app.AlertDialog
-import android.net.Uri
+import android.graphics.Color
 import android.os.Bundle
-import android.widget.Button
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.google.gson.Gson
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-    private val gson = Gson()
-    private val editorConfig = EditorConfig()
-    private val allEffects = mutableListOf<EffectConfig>()
-    private lateinit var effectAdapter: EffectAdapter
 
-    private var selectedVideoUri: Uri? = null
-    private var selectedAudioUri: Uri? = null
+    private val timeZoneIds = listOf(
+        "UTC",
+        "America/New_York",
+        "America/Los_Angeles",
+        "Europe/London",
+        "Europe/Paris",
+        "Asia/Tokyo",
+        "Asia/Dubai",
+        "Australia/Sydney"
+    )
 
-    private val pickVideoLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            selectedVideoUri = uri
-            findViewById<TextView>(R.id.selectedVideoText).text = "Video source: ${uri.toString()}"
-        }
-    }
+    private val mainHandler = Handler(Looper.getMainLooper())
 
-    private val pickAudioLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            selectedAudioUri = uri
-            findViewById<TextView>(R.id.selectedAudioText).text = "Audio source: ${uri.toString()}"
-        }
-    }
+    private val updateClockRunnable = object : Runnable {
+        override fun run() {
+            val systemZone = ZoneId.systemDefault()
+            val timeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)
+            val dateFormatter = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.US)
 
-    private val createJsonLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri == null) return@registerForActivityResult
-        val text = gson.toJson(editorConfig)
-        contentResolver.openOutputStream(uri)?.use { stream ->
-            stream.write(text.toByteArray())
-        }
-        findViewById<TextView>(R.id.commandPreview).text = "Saved effect config JSON to ${uri.path}"
-    }
+            findViewById<TextView>(R.id.currentTimeText).text =
+                Instant.now().atZone(systemZone).format(timeFormatter)
+            findViewById<TextView>(R.id.currentZoneText).text =
+                "${systemZone.id} • ${Instant.now().atZone(systemZone).format(dateFormatter)}"
 
-    private val openJsonLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri == null) return@registerForActivityResult
-        try {
-            val text = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            if (text.isNullOrBlank()) {
-                findViewById<TextView>(R.id.commandPreview).text = "Import failed: empty JSON file"
-                return@registerForActivityResult
+            val timezoneContainer = findViewById<LinearLayout>(R.id.timezoneContainer)
+            for (i in 0 until timezoneContainer.childCount) {
+                val row = timezoneContainer.getChildAt(i) as LinearLayout
+                val zoneLabel = row.getChildAt(0) as TextView
+                val zoneTime = row.getChildAt(1) as TextView
+                val zoneDate = row.getChildAt(2) as TextView
+
+                val zoneId = timeZoneIds[i]
+                val zone = ZoneId.of(zoneId)
+                val time = Instant.now().atZone(zone)
+                zoneLabel.text = zoneId
+                zoneTime.text = time.format(timeFormatter)
+                zoneDate.text = time.format(dateFormatter)
             }
 
-            val parsed = gson.fromJson(text, EditorConfig::class.java)
-            editorConfig.videoEffects.clear()
-            editorConfig.audioEffects.clear()
-            if (parsed.videoEffects != null) editorConfig.videoEffects.addAll(parsed.videoEffects)
-            if (parsed.audioEffects != null) editorConfig.audioEffects.addAll(parsed.audioEffects)
-            syncEffects()
-            findViewById<TextView>(R.id.commandPreview).text = "Imported JSON config from ${uri.toString()}"
-        } catch (e: Exception) {
-            findViewById<TextView>(R.id.commandPreview).text = "Import failed: ${e.message}"
+            mainHandler.postDelayed(this, 1000)
         }
     }
 
@@ -68,88 +63,64 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        val recyclerView = findViewById<RecyclerView>(R.id.effectList)
-        recyclerView.layoutManager = LinearLayoutManager(this)
-        effectAdapter = EffectAdapter(allEffects) { effect -> removeEffect(effect) }
-        recyclerView.adapter = effectAdapter
-
-        findViewById<Button>(R.id.addVideoEffectButton).setOnClickListener {
-            showEffectPicker(isVideo = true)
-        }
-
-        findViewById<Button>(R.id.addAudioEffectButton).setOnClickListener {
-            showEffectPicker(isVideo = false)
-        }
-
-        findViewById<Button>(R.id.saveJsonButton).setOnClickListener {
-            createJsonLauncher.launch("effects_${System.currentTimeMillis()}.json")
-        }
-
-        findViewById<Button>(R.id.importJsonButton).setOnClickListener {
-            openJsonLauncher.launch(arrayOf("application/json"))
-        }
-
-        findViewById<Button>(R.id.replaceAudioButton).setOnClickListener {
-            pickAudioLauncher.launch(arrayOf("audio/*"))
-        }
-
-        findViewById<Button>(R.id.exportButton).setOnClickListener {
-            val outputName = "output.${editorConfig.outputFormat}"
-            val ffmpegCommand = EffectEngine.createFfmpegCommand(
-                config = editorConfig,
-                videoInput = selectedVideoUri?.toString() ?: null,
-                audioInput = selectedAudioUri?.toString() ?: null,
-                outputPath = outputName
-            )
-            findViewById<TextView>(R.id.commandPreview).text = ffmpegCommand
-        }
-
-        findViewById<Button>(R.id.addVideoEffectButton).performClick()
+        buildTimeZoneCards()
+        mainHandler.post(updateClockRunnable)
     }
 
-    private fun showEffectPicker(isVideo: Boolean) {
-        val names = if (isVideo) EffectEngine.videoEffectNames else EffectEngine.audioEffectNames
-        AlertDialog.Builder(this)
-            .setTitle(if (isVideo) "Add Video effect" else "Add Audio effect")
-            .setItems(names.toTypedArray()) { _, index ->
-                val name = names[index]
-                val effect = EffectConfig(
-                    name = name,
-                    type = name,
-                    isVideo = isVideo,
-                    repetitions = 1,
-                    startMs = 0,
-                    durationMs = 1000,
-                    parameters = mutableMapOf(
-                        "strength" to "1.0",
-                        "pitch" to "2.0"
-                    )
-                )
+    override fun onDestroy() {
+        super.onDestroy()
+        mainHandler.removeCallbacks(updateClockRunnable)
+    }
 
-                if (isVideo) {
-                    editorConfig.videoEffects.add(effect)
-                } else {
-                    editorConfig.audioEffects.add(effect)
+    private fun buildTimeZoneCards() {
+        val container = findViewById<LinearLayout>(R.id.timezoneContainer)
+        container.removeAllViews()
+
+        for (zoneId in timeZoneIds) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setBackgroundColor(Color.parseColor("#111827"))
+                setPadding(20, 18, 20, 18)
+                layoutParams = ViewGroup.MarginLayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    bottomMargin = 12
                 }
-
-                syncEffects()
             }
-            .show()
-    }
 
-    private fun removeEffect(effect: EffectConfig) {
-        if (effect.isVideo) {
-            editorConfig.videoEffects.removeIf { it.id == effect.id }
-        } else {
-            editorConfig.audioEffects.removeIf { it.id == effect.id }
+            val zoneName = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                textSize = 16f
+                setTextColor(Color.parseColor("#E2E8F0"))
+                gravity = Gravity.START
+            }
+
+            val zoneTime = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                textSize = 18f
+                setTextColor(Color.parseColor("#7DD3FC"))
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+            }
+
+            val zoneDate = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    marginStart = 18
+                }
+                textSize = 13f
+                setTextColor(Color.parseColor("#CBD5E1"))
+            }
+
+            row.addView(zoneName)
+            row.addView(zoneTime)
+            row.addView(zoneDate)
+            container.addView(row)
         }
-        syncEffects()
-    }
-
-    private fun syncEffects() {
-        allEffects.clear()
-        allEffects.addAll(editorConfig.videoEffects)
-        allEffects.addAll(editorConfig.audioEffects)
-        effectAdapter.notifyDataSetChanged()
     }
 }
